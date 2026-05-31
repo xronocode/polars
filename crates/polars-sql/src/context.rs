@@ -2020,30 +2020,37 @@ impl SQLContext {
         let mut projection_aliases = PlHashSet::new();
         let mut group_key_aliases = PlHashSet::new();
 
-        // Pre-compute group key data (stripped expression + output name) to avoid repeated work.
-        // We check both expression AND output name match to avoid cross-aliasing issues.
+        // Pre-compute group key data: (alias-stripped expr, base name for matching,
+        // actual column name after group_by).
         let group_key_data: Vec<_> = group_by_keys
             .iter()
             .map(|gk| {
-                (
-                    strip_outer_alias(gk),
-                    gk.to_field(&schema_before).ok().map(|f| f.name),
-                )
+                let stripped = strip_outer_alias(gk);
+                let match_name = stripped.to_field(&schema_before).ok().map(|f| f.name);
+                let col_name = gk.to_field(&schema_before).ok().map(|f| f.name);
+                (stripped, match_name, col_name)
             })
             .collect();
 
-        let projection_matches_group_key: Vec<bool> = projections
+        let projection_group_key_match: Vec<Option<PlSmallStr>> = projections
             .iter()
             .map(|p| {
                 let p_stripped = strip_outer_alias(p);
-                let p_name = p.to_field(&schema_before).ok().map(|f| f.name);
+                let p_name = p_stripped.to_field(&schema_before).ok().map(|f| f.name);
                 group_key_data
                     .iter()
-                    .any(|(gk_stripped, gk_name)| *gk_stripped == p_stripped && *gk_name == p_name)
+                    .find_map(|(gk_stripped, gk_match_name, gk_col_name)| {
+                        if *gk_stripped == p_stripped && *gk_match_name == p_name {
+                            gk_col_name.clone()
+                        } else {
+                            None
+                        }
+                    })
             })
             .collect();
 
-        for (e, &matches_group_key) in projections.iter().zip(&projection_matches_group_key) {
+        for (e, matches_group_key) in projections.iter().zip(&projection_group_key_match) {
+            let matches_group_key = matches_group_key.is_some();
             // `Len` represents COUNT(*) so we treat as an aggregation here.
             let is_non_group_key_expr = !matches_group_key
                 && has_expr(e, |e| {
@@ -2181,14 +2188,18 @@ impl SQLContext {
         // (will also drop any temporary columns created for the HAVING post-filter).
         let final_projection = projection_schema
             .iter_names()
-            .zip(projections.iter().zip(&projection_matches_group_key))
-            .map(|(name, (projection_expr, &matches_group_key))| {
+            .zip(projections.iter().zip(&projection_group_key_match))
+            .map(|(name, (projection_expr, group_key_match))| {
                 if let Some(expr) = projection_overrides.get(name.as_str()) {
                     expr.clone()
                 } else if let Some(aliased_name) = aliased_aggregations.get(name) {
                     col(aliased_name.clone()).alias(name.clone())
-                } else if group_by_keys_schema.get(name).is_some() && matches_group_key {
-                    col(name.clone())
+                } else if let Some(gk_name) = group_key_match {
+                    if gk_name == name {
+                        col(name.clone())
+                    } else {
+                        col(gk_name.clone()).alias(name.clone())
+                    }
                 } else if group_by_keys_schema.get(name).is_some()
                     || projection_aliases.contains(name.as_str())
                     || group_key_aliases.contains(name.as_str())

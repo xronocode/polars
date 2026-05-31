@@ -202,3 +202,90 @@ fn iss_23134() -> PolarsResult<()> {
 
     Ok(())
 }
+
+#[test]
+fn iss_27735_group_by_computed_expr_with_alias() -> PolarsResult<()> {
+    let df = df! {
+        "x" => &[3i64, 5, 7],
+    }?
+    .lazy();
+
+    let mut ctx = SQLContext::new();
+    ctx.register("t", df);
+
+    let result = ctx
+        .execute("SELECT (x >= 5) AS inside, COUNT(*) AS n FROM t GROUP BY (x >= 5)")?
+        .collect()?;
+
+    let inside = result.column("inside")?.bool()?;
+    let n = result.column("n")?.u32()?;
+
+    let mut pairs: Vec<(bool, u32)> = inside
+        .iter()
+        .zip(n.into_no_null_iter())
+        .map(|(b, n)| (b.unwrap(), n))
+        .collect();
+    pairs.sort_by_key(|(b, _)| *b);
+
+    assert_eq!(pairs, vec![(false, 1), (true, 2)]);
+
+    Ok(())
+}
+
+#[test]
+fn iss_27735_group_by_computed_expr_no_alias() -> PolarsResult<()> {
+    let df = df! {
+        "x" => &[3i64, 5, 7],
+    }?
+    .lazy();
+
+    let mut ctx = SQLContext::new();
+    ctx.register("t", df);
+
+    let result = ctx
+        .execute("SELECT (x >= 5), COUNT(*) AS n FROM t GROUP BY (x >= 5)")?
+        .collect()?;
+
+    let col_x = result.column("x")?.bool()?;
+    let n = result.column("n")?.u32()?;
+
+    let mut pairs: Vec<(bool, u32)> = col_x
+        .iter()
+        .zip(n.into_no_null_iter())
+        .map(|(b, n)| (b.unwrap(), n))
+        .collect();
+    pairs.sort_by_key(|(b, _)| *b);
+
+    assert_eq!(pairs, vec![(false, 1), (true, 2)]);
+
+    Ok(())
+}
+
+#[test]
+fn iss_27735_group_by_all_computed_expr() -> PolarsResult<()> {
+    let df = df! {
+        "x" => &[3i64, 5, 7],
+    }?
+    .lazy();
+
+    let mut ctx = SQLContext::new();
+    ctx.register("t", df);
+
+    let result = ctx
+        .execute("SELECT (x >= 5) AS inside, COUNT(*) AS n FROM t GROUP BY ALL")?
+        .collect()?;
+
+    let inside = result.column("inside")?.bool()?;
+    let n = result.column("n")?.u32()?;
+
+    let mut pairs: Vec<(bool, u32)> = inside
+        .iter()
+        .zip(n.into_no_null_iter())
+        .map(|(b, n)| (b.unwrap(), n))
+        .collect();
+    pairs.sort_by_key(|(b, _)| *b);
+
+    assert_eq!(pairs, vec![(false, 1), (true, 2)]);
+
+    Ok(())
+}
